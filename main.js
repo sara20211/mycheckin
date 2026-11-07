@@ -8,7 +8,7 @@ const mask = (str, startLen = 4, endLen = 4) => {
 
 // ========== 默认 UA ==========
 const DEFAULT_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36'
 
 // ========== Cookie 结构诊断 ==========
 // GLaDOS 登录态由多个 Cookie 共同组成。新版站点用冒号命名（koa:sess / gld:sess），
