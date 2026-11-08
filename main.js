@@ -6,6 +6,21 @@ const mask = (str, startLen = 4, endLen = 4) => {
   return str.slice(0, startLen) + '****' + str.slice(-endLen)
 }
 
+// ========== 工具函数：延时与 Proof 计算 ==========
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// 对应前端模块 614 (checkinProof): SHA-256(nonce + ".glados-observe-v1")
+// 使用 Node 18+ 全局内置 Web Crypto API，同时兼容 CommonJS 与 ES Module
+const CHECKIN_SALT = 'glados-observe-v1'
+const makeCheckinProof = async (nonce) => {
+  if (!nonce) return ''
+  const data = new TextEncoder().encode(`${nonce}.${CHECKIN_SALT}`)
+  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 // ========== 默认 UA ==========
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36'
@@ -164,12 +179,45 @@ const glados = async () => {
         'referer': `https://${domain}/console/checkin`,
         'user-agent': ua,
       }
-      // 1. 执行签到（与原代码顺序完全一致）
+
+      // 1. 获取签到 Challenge Nonce (GET 请求) 并计算 Proof
+      console.log(`[${tag}] 正在获取签到 Challenge Nonce...`)
+      const challengeRes = await fetch(`https://${domain}/api/user/checkin/challenge`, {
+        method: 'GET',
+        headers: { ...common },
+      })
+      if (!challengeRes.ok) {
+        throw new Error(`Challenge接口HTTP错误: ${challengeRes.status} ${challengeRes.statusText}`)
+      }
+      const challengeData = await challengeRes.json()
+      console.log(`[${tag}] Challenge接口响应码: ${challengeData?.code ?? '无'}`)
+      if (challengeData?.code !== 0 || !challengeData?.nonce) {
+        throw new Error(
+          `获取 Challenge 失败: ${challengeData?.message || '未返回 nonce'} (code=${challengeData?.code})`
+        )
+      }
+
+      const nonce = challengeData.nonce
+      const proof = await makeCheckinProof(nonce)
+      console.log(`[${tag}] Nonce: ${mask(nonce, 6, 6)} | Proof: ${mask(proof, 6, 6)}`)
+
+      // 随机等待 500~1200ms 模拟浏览器正常执行间隔
+      await sleep(500 + Math.floor(Math.random() * 700))
+
+      // 2. 执行签到（POST 携带 token、nonce、proof）
       console.log(`[${tag}] 正在执行签到请求...`)
       const checkinRes = await fetch(`https://${domain}/api/user/checkin`, {
         method: 'POST',
-        headers: { ...common, 'content-type': 'application/json' },
-        body: JSON.stringify({ token: domain }),
+        headers: {
+          ...common,
+          'origin': `https://${domain}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          token: domain,
+          nonce: nonce,
+          proof: proof,
+        }),
       })
       // HTTP 层错误捕获（网络错误、404、500等）
       if (!checkinRes.ok) {
@@ -187,7 +235,13 @@ const glados = async () => {
       if (alreadyCheckedIn) {
         console.log(`[${tag}] 今日已签到过，继续查询剩余天数与积分...`)
       }
-      // 2. 获取账号状态（签到后更新剩余天数）
+
+      // 提取本次签到获得的积分（从 action.points 或 action.list[0].change 获取）
+      const gainedPoints =
+        action?.points ??
+        (action?.list?.[0]?.change != null ? Number(action.list[0].change) : null)
+
+      // 3. 获取账号状态（签到后更新剩余天数）
       console.log(`[${tag}] 正在获取账号状态...`)
       const statusRes = await fetch(`https://${domain}/api/user/status`, {
         method: 'GET',
@@ -204,7 +258,7 @@ const glados = async () => {
       // 签到成功
       const leftDays = Number(status?.data?.leftDays)
 
-      // ========== 3. 查询当前积分（始终执行，保证运行日志能看到每个账号积分） ==========
+      // ========== 4. 查询当前积分（始终执行，保证运行日志能看到每个账号积分） ==========
       let currentPoints = null
       try {
         console.log(`[${tag}] 正在获取积分...`)
@@ -230,7 +284,7 @@ const glados = async () => {
         pointsSummary.push(`账号${accountNo}(${account.envName}): 查询失败`)
       }
 
-      // ========== 4. 积分自动兑换（满500积分自动消耗500积分兑换100天） ==========
+      // ========== 5. 积分自动兑换（满500积分自动消耗500积分兑换100天） ==========
       // 开关：AUTO_EXCHANGE，默认开启；设为 false 可关闭
       // 阈值：EXCHANGE_THRESHOLD，默认 500
       const autoExchange = String(process.env.AUTO_EXCHANGE || 'true').toLowerCase() !== 'false'
@@ -240,7 +294,11 @@ const glados = async () => {
           console.log(`[${tag}] 积分 ${currentPoints} ≥ ${exchangeThreshold}，自动兑换 100 天...`)
           const exRes = await fetch(`https://${domain}/api/user/exchange`, {
             method: 'POST',
-            headers: { ...common, 'content-type': 'application/json' },
+            headers: {
+              ...common,
+              'origin': `https://${domain}`,
+              'content-type': 'application/json',
+            },
             body: JSON.stringify({ planType: 'plan500' }),
           })
           if (!exRes.ok) {
@@ -271,13 +329,17 @@ const glados = async () => {
       }
       // ========== 新增部分结束 ==========
 
+      const checkinMsg = alreadyCheckedIn
+        ? '今日已签到过（无新增积分）'
+        : `${action?.message || '签到成功'}${gainedPoints != null ? ` (本次 +${gainedPoints} 点)` : ''}`
+
       console.log(`[${tag}] ✅ ${alreadyCheckedIn ? '今日已签到过' : '签到成功'}`)
-      console.log(`[${tag}] 返回消息: ${action?.message || (alreadyCheckedIn ? '今日已签到过' : '')}`)
+      console.log(`[${tag}] 返回消息: ${checkinMsg}`)
       console.log(`[${tag}] 剩余天数: ${leftDays} 天`)
       console.log(`[${tag}] 当前积分: ${currentPoints != null ? currentPoints + ' 点' : '查询失败'}`)
       notice.push(
         `【账号${accountNo}】签到成功`,
-        `${alreadyCheckedIn ? '今日已签到过（无新增积分）' : action?.message}`,
+        checkinMsg,
         `剩余天数: ${leftDays} 天`,
         `当前积分: ${currentPoints != null ? currentPoints + ' 点' : '查询失败'}`
       )
