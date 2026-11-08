@@ -10,15 +10,21 @@ const mask = (str, startLen = 4, endLen = 4) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // 对应前端模块 614 (checkinProof): SHA-256(nonce + ".glados-observe-v1")
-// 使用 Node 18+ 全局内置 Web Crypto API，同时兼容 CommonJS 与 ES Module
+// 兼容所有 Node.js 版本及 CommonJS / ES Module 双模式
 const CHECKIN_SALT = 'glados-observe-v1'
 const makeCheckinProof = async (nonce) => {
   if (!nonce) return ''
-  const data = new TextEncoder().encode(`${nonce}.${CHECKIN_SALT}`)
-  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
+  const raw = `${nonce}.${CHECKIN_SALT}`
+  try {
+    // 兼容 ESM 与 CommonJS 的动态导入，使用 Node 原生 crypto.createHash
+    const nodeCrypto = await import('node:crypto')
+    const createHash = nodeCrypto.createHash || nodeCrypto.default?.createHash
+    return createHash('sha256').update(raw, 'utf8').digest('hex')
+  } catch {
+    // 兜底：旧版 CommonJS require
+    // eslint-disable-next-line no-undef
+    return require('crypto').createHash('sha256').update(raw, 'utf8').digest('hex')
+  }
 }
 
 // ========== 默认 UA ==========
